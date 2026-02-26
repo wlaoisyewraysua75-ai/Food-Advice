@@ -1,30 +1,56 @@
 # app/llm_engine.py
 
-import requests
 import json
 import re
+
+import requests
 
 # 配置 Ollama 本地地址
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
 # 确保这里用的模型名字和你 ollama list 出来的一致
-MODEL_NAME = "qwen3:8b_Q8"
+MODEL_NAME = "qwen2.5_7b_instruct_q8"
 
 
 def query_ollama(prompt, system_prompt=""):
     """
     发送请求给 Ollama，并返回生成的原始文本
     """
+    # 🌟 新增：定义极其严格的 JSON Schema
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "analysis": {
+                "type": "string",
+                "description": "对用户需求的分析和推导过程"
+            },
+            "recommendations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "dish_name": {"type": "string"},
+                        "cuisine": {"type": "string"},
+                        "price": {"type": "integer"},
+                        "reason": {"type": "string"}
+                    },
+                    "required": ["dish_name", "cuisine", "price", "reason"]
+                }
+            }
+        },
+        "required": ["analysis", "recommendations"]
+    }
+
     payload = {
         "model": MODEL_NAME,
         "prompt": prompt,
         "system": system_prompt,
         "stream": False,
-        "format": "json",  # 新增这一行：强制模型输出 JSON 格式
+        "format": response_schema,  # 🌟 将这里的 "json" 替换为我们定义的 schema
         "options": {
             "temperature": 0.0,
-            "num_ctx": 2048,
-            "num_predict": 1000,
-            "repeat_penalty": 1.1,  # 降低惩罚值
+            "num_ctx": 4096,
+            "num_predict": 2000,
+            "repeat_penalty": 1.1,
         }
     }
 
@@ -71,28 +97,27 @@ def get_food_recommendation(input_data, mode="structured"):
 
     # 通用的 System Prompt
     system_prompt = """
-    你是一个专业的美食推荐助手。
+    你是一个后台美食推荐 API 接口。
+    你只能返回合法的 JSON 数据，绝对不要输出任何问候语、Markdown 标记（如 ```json）或 "Assistant:" 等对话前缀。
 
     【任务】
-    1. 分析用户的需求（可能是具体的条件，也可能是一段模糊的文字）。
-    2. 如果用户没有提供预算，请根据其描述的场景（如“穷游”vs“商务”）自动估算合理的预算范围。
-    3. 必须输出 JSON 格式。
+    1. 根据用户输入，推测预算和场景。
+    2. 推荐 3-5 道符合要求的菜品。
+    3. 把你的思考分析过程写在 "analysis" 字段中。
 
-    【输出格式】
-    先输出分析过程，然后输出 JSON：
-    ```json
+    【严格的数据结构】
+    必须严格遵循以下 JSON 结构，并确保所有的 Key 都是英文：
     {
-        "analysis": "用户想吃清淡的，且提到了女朋友，推测是约会场景，预算预估 200元...",
+        "analysis": "在这里写下你的分析推导过程，例如：根据需求，用户在成都寻找100元的川菜聚餐...",
         "recommendations": [
             {
-                "dish_name": "菜名",
-                "cuisine": "菜系",
-                "price": 50,
-                "reason": "理由"
+                "dish_name": "宫保鸡丁",
+                "cuisine": "川菜",
+                "price": 38,
+                "reason": "经典川菜，微辣鲜香，非常适合朋友聚餐分享。"
             }
         ]
     }
-    ```
     """
 
     # 根据模式构建 User Prompt
@@ -114,12 +139,14 @@ def get_food_recommendation(input_data, mode="structured"):
         """
     else:
         # 自然语言模式
+        # 自然语言模式
         user_prompt = f"""
         【用户自述需求】
         "{input_data}"
 
-        请根据这段话，推测用户的预算、口味和场景，并推荐 3-5 道合适的菜品。
-        如果是询问做法或无关话题，请委婉拒绝并引导回美食推荐。
+        请根据用户的这段话进行推理。
+        1. 将你推测出的用户预算、口味偏好、就餐场景等所有分析过程，以及应对无关话题的引导话术，全部写在 JSON 的 "analysis" 字段中！绝对不要尝试创建额外的 JSON 字段！
+        2. 即使需求模糊或偏离主题，你也必须在 "recommendations" 字段中生硬地推荐 3-5 道默认的经典菜品以满足 JSON 格式要求，绝对不能漏掉 "recommendations" 数组或改变内部的 key。
         """
 
     # 1. 调用 LLM
