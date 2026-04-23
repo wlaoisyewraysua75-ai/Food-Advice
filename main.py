@@ -142,6 +142,11 @@ with tab2:
 with tab3:
     st.subheader("今日膳食计划")
 
+    # 顶部控制区
+    col_target, col_space = st.columns([1, 2])
+    with col_target:
+        target_cal = st.slider("🎯 目标摄入总热量 (kcal)", 1000, 3000, 1600, 100)
+
 
     @st.cache_data
     def load_food_data():
@@ -149,7 +154,7 @@ with tab3:
             with open("app/food_data.json", "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
-            return {"breakfast": [], "lunch": [], "dinner": []}
+            return {}
 
 
     food_db = load_food_data()
@@ -157,47 +162,102 @@ with tab3:
     # 初始化 session_state
     if "current_meals" not in st.session_state:
         st.session_state.current_meals = {}
+    if "meal_locks" not in st.session_state:
+        st.session_state.meal_locks = {"breakfast": False, "lunch": False, "dinner": False}
+
+
+    def generate_single_meal(meal_type):
+        """为单餐随机生成主副食组合"""
+        pool = food_db.get(meal_type, {})
+        items = []
+        cals = 0
+        for category in ["staple", "protein", "side"]:
+            if pool.get(category):
+                choice = random.choice(pool[category])
+                items.append(f"{choice['name']}({choice['unit']})")
+                cals += choice['calories']
+
+        return {
+            "desc": " + ".join(items) if items else "暂无数据",
+            "calories": cals
+        }
 
 
     def roll_meals():
-        meals = {}
-        for meal_type in ["breakfast", "lunch", "dinner"]:
-            if food_db.get(meal_type) and len(food_db[meal_type]) > 0:
-                meals[meal_type] = random.choice(food_db[meal_type])
-            else:
-                meals[meal_type] = {"name": "暂无数据", "calories": 0, "unit": "-"}
-        st.session_state.current_meals = meals
+        """具有重采样机制的组合生成算法"""
+        best_diff = float('inf')
+        best_combo = {}
+
+        # 尝试最多 100 次重采样，寻找最贴近目标热量的组合
+        for _ in range(100):
+            temp_meals = {}
+            current_total = 0
+
+            for meal_type in ["breakfast", "lunch", "dinner"]:
+                # 如果该餐被锁定，直接继承现有数据
+                if st.session_state.meal_locks[meal_type] and meal_type in st.session_state.current_meals:
+                    temp_meals[meal_type] = st.session_state.current_meals[meal_type]
+                else:
+                    # 未锁定则重新生成组合
+                    temp_meals[meal_type] = generate_single_meal(meal_type)
+
+                current_total += temp_meals[meal_type]["calories"]
+
+            diff = abs(current_total - target_cal)
+
+            # 记录误差最小的一组
+            if diff < best_diff:
+                best_diff = diff
+                best_combo = temp_meals
+
+            # 如果总热量与目标的误差在 5% 以内，即可认为匹配成功，提前终止计算
+            if diff <= target_cal * 0.05:
+                break
+
+        st.session_state.current_meals = best_combo
 
 
+    # 首次进入页面时初始化
     if not st.session_state.current_meals:
         roll_meals()
 
     meals = st.session_state.current_meals
     total_calories = sum(m.get("calories", 0) for m in meals.values())
 
-    st.metric("预估总热量 (大卡)", f"{total_calories}")
+    # 展示总热量与目标偏差
+    diff_val = total_calories - target_cal
+    diff_str = f"+{diff_val}" if diff_val > 0 else f"{diff_val}"
+    st.metric("预估总热量 (大卡)", f"{total_calories}", diff_str, delta_color="inverse")
 
+    # 展示三餐卡片并提供锁定功能
     col_b, col_l, col_d = st.columns(3)
+
     with col_b:
         st.info("🍳 早餐")
-        st.write(f"**{meals.get('breakfast', {}).get('name', '未分配')}**")
-        st.caption(
-            f"{meals.get('breakfast', {}).get('calories', 0)} kcal / {meals.get('breakfast', {}).get('unit', '-')}")
+        st.write(f"**{meals.get('breakfast', {}).get('desc', '未分配')}**")
+        st.caption(f"{meals.get('breakfast', {}).get('calories', 0)} kcal")
+        st.session_state.meal_locks["breakfast"] = st.checkbox("🔒 锁定不变",
+                                                               value=st.session_state.meal_locks["breakfast"],
+                                                               key="lock_b")
 
     with col_l:
         st.warning("🍱 午餐")
-        st.write(f"**{meals.get('lunch', {}).get('name', '未分配')}**")
-        st.caption(f"{meals.get('lunch', {}).get('calories', 0)} kcal / {meals.get('lunch', {}).get('unit', '-')}")
+        st.write(f"**{meals.get('lunch', {}).get('desc', '未分配')}**")
+        st.caption(f"{meals.get('lunch', {}).get('calories', 0)} kcal")
+        st.session_state.meal_locks["lunch"] = st.checkbox("🔒 锁定不变", value=st.session_state.meal_locks["lunch"],
+                                                           key="lock_l")
 
     with col_d:
         st.success("🥗 晚餐")
-        st.write(f"**{meals.get('dinner', {}).get('name', '未分配')}**")
-        st.caption(f"{meals.get('dinner', {}).get('calories', 0)} kcal / {meals.get('dinner', {}).get('unit', '-')}")
+        st.write(f"**{meals.get('dinner', {}).get('desc', '未分配')}**")
+        st.caption(f"{meals.get('dinner', {}).get('calories', 0)} kcal")
+        st.session_state.meal_locks["dinner"] = st.checkbox("🔒 锁定不变", value=st.session_state.meal_locks["dinner"],
+                                                            key="lock_d")
 
     st.write("")
     col_btn1, col_btn2, _ = st.columns([1, 1, 2])
     with col_btn1:
-        if st.button("🔄 换一组", use_container_width=True):
+        if st.button("🔄 换一批 (仅限未锁定)", use_container_width=True):
             roll_meals()
             st.rerun()
     with col_btn2:
@@ -205,6 +265,7 @@ with tab3:
             save_daily_data(total_calories)
             st.success("成功记录今日摄入数据！")
 
+    # 历史趋势绘图保持不变
     st.divider()
     st.subheader("📈 近期摄入趋势")
     log_path = "data/daily_log.csv"
